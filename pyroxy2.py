@@ -31,6 +31,13 @@ import select
 import socket
 import sys
 
+# Make sure the right version of python is being used.
+try:
+    assert sys.version_info >= (3, 0, 0), "python version error"
+except AssertionError:
+    print("error: python3 is required to run this program!")
+    exit(1)
+
 # Safe theoretical max packet data sizes (shouldn't ever be this much tho)
 RECV_SIZE_TCP = ((65536 - 60) - 60)
 RECV_SIZE_UDP = ((65536 - 60) - 8)
