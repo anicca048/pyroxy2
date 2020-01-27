@@ -35,38 +35,40 @@ import sys
 RECV_SIZE_TCP = ((65536 - 60) - 60)
 RECV_SIZE_UDP = ((65536 - 60) - 8)
 
+# Allow stopping of the proxy loop from signal handling function.
 loop_entered = False
 loop_stop = False
 
-connection_sock = None
-client_sock = None
+# Allow cleanup of sockets on sigint (if thrown before accept()).
+conn_sock = None
+server_sock = None
 relay_sock = None
 
 # Sets up sockets and conditions for proxying loop.
 def main(protocol, src_addr, src_port, dest_addr, dest_port):
-	global loop_entered, loop_stop, connection_sock, client_sock, relay_sock
+	global loop_entered, loop_stop, conn_sock, server_sock, relay_sock
 	# Register SIGINT handler for clean exiting while in main loop.
 	signal.signal(signal.SIGINT, signal_handler)
 
-	print("Pyroxy2")
+	print("\nPyroxy2")
 
-	relay_address = (dest_addr, dest_port)
+	target_address = (dest_addr, dest_port)
 
 	# Build and bind client socket.
 	try:
 		if protocol == "tcp":
-			client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+			server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 		else:
-			client_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+			server_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-		client_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+		server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 	except socket.error:
 		print("[!] error: failed to create client socket!")
 		socket_cleanup()
 		sys.exit(1)
 
 	try:
-		client_sock.bind((src_addr, src_port))
+		server_sock.bind((src_addr, src_port))
 	except socket.error:
 		print("[!] error: failed to bind client socket!")
 		socket_cleanup()
@@ -77,12 +79,12 @@ def main(protocol, src_addr, src_port, dest_addr, dest_port):
 		print("[+] waiting for client connection.")
 
 		# Wait for client to connect.
-		client_sock.listen(1)
-		connection_sock, client_address = client_sock.accept()
+		server_sock.listen(1)
+		conn_sock, client_address = server_sock.accept()
 	else:
 		print("[+] waiting for first packet.")
 
-		pre_data, client_address = client_sock.recvfrom(RECV_SIZE_UDP)
+		pre_data, client_address = server_sock.recvfrom(RECV_SIZE_UDP)
 
 	# Build and bind relay socket.
 	try:
@@ -101,31 +103,33 @@ def main(protocol, src_addr, src_port, dest_addr, dest_port):
 
 		# Connect to relay target.
 		try:
-			relay_sock.connect(relay_address)
+			relay_sock.connect(target_address)
 		except socket.error:
 			print("[!] error: failed to connect to relay target!")
 			socket_cleanup()
 			sys.exit(1)
 	else:
-		relay_sock.sendto(pre_data, relay_address)
+		relay_sock.sendto(pre_data, target_address)
 
 	print("[+] relaying data from: ", client_address[0], ":", client_address[1],
-		  " to: ", relay_address[0], ":", relay_address[1], sep='')
+		  " to: ", target_address[0], ":", target_address[1], sep='')
 
 	# Mark that we have entered main proxy loop for exit handling.
 	loop_entered = True
 
 	# Set sockets to nonblocking and enter main packet handling / proxy loop.
 	if protocol == "tcp":
-		connection_sock.setblocking(0)
+		conn_sock.setblocking(0)
 		relay_sock.setblocking(0)
 
 		tcp_loop()
 	else:
-		client_sock.setblocking(0)
+		server_sock.setblocking(0)
 		relay_sock.setblocking(0)
 
-		udp_loop(client_address, relay_address)
+		udp_loop(client_address, target_address)
+
+	print("\r[+] exiting...")
 
 	socket_cleanup()
 
@@ -134,36 +138,18 @@ def signal_handler(sig, frame):
 	global loop_entered, loop_stop
 
 	if not loop_entered:
-		print("\r[+] exiting.")
+		print("\r[+] exiting...")
 
 		socket_cleanup()
 		sys.exit(0)
 	elif not loop_stop:
-		print("\r[+] exiting.")
-
 		loop_stop = True
 
 # Easy socket cleanup for use in multiple places.
 def socket_cleanup():
-	global connection_sock, client_sock, relay_sock
+	global conn_sock, server_sock, relay_sock
 
 	# If sockets have been created attempt to shutdown and then close.
-	if connection_sock:
-		try:
-			connection_sock.shutdown(socket.SHUT_RDWR)
-		except socket.error:
-			pass
-		finally:
-			connection_sock.close()
-
-	if client_sock:
-		try:
-			client_sock.shutdown(socket.SHUT_RDWR)
-		except socket.error:
-			pass
-		finally:
-			client_sock.close()
-
 	if relay_sock:
 		try:
 			relay_sock.shutdown(socket.SHUT_RDWR)
@@ -172,53 +158,73 @@ def socket_cleanup():
 		finally:
 			relay_sock.close()
 
+	if conn_sock:
+		try:
+			conn_sock.shutdown(socket.SHUT_RDWR)
+		except socket.error:
+			pass
+		finally:
+			conn_sock.close()
+
+	if server_sock:
+		try:
+			server_sock.shutdown(socket.SHUT_RDWR)
+		except socket.error:
+			pass
+		finally:
+			server_sock.close()
+
 # Proxies data between two tcp connections.
 def tcp_loop():
-	global connection_sock, relay_sock, loop_stop
+	global conn_sock, relay_sock, loop_stop
 
 	# Use short timeout select to detect waiting data on sockets.
 	while not loop_stop:
-		recieved_data, var1, var2 = select.select([connection_sock, relay_sock],
+		rd_sock, wr_sock, ex_sock = select.select([conn_sock, relay_sock],
 												  [], [], 3)
 
 		# Proccess all recieved packets.
-		for sock in recieved_data:
+		for sock in rd_sock:
 			# Send data from client to relay target.
-			if sock is connection_sock:
-				data = connection_sock.recv(RECV_SIZE_TCP)
+			if sock is conn_sock:
+				data = conn_sock.recv(RECV_SIZE_TCP)
 
-				if data:
-					relay_sock.sendall(data)
+				if not data:
+					print("[-] connection closed by client.")
+					return
+				
+				relay_sock.sendall(data)
 			# Send data from relay target to client.
 			elif sock is relay_sock:
 				data = relay_sock.recv(RECV_SIZE_TCP)
 
-				if data:
-					connection_sock.sendall(data)
+				if not data:
+					print("[-] connection closed by target.")
+					return
+
+				conn_sock.sendall(data)
 
 # Proxoies data between two udp connections.
-def udp_loop(client_address, relay_address):
-	global client_sock, relay_sock, loop_stop
+def udp_loop(client_address, target_address):
+	global server_sock, relay_sock, loop_stop
 
 	# Use short timeout select to detect waiting data on sockets.
 	while not loop_stop:
-		recieved_data, var1, var2 = select.select([client_sock, relay_sock],
+		rd_sock, wr_sock, ex_sock = select.select([server_sock, relay_sock],
 												  [], [], 3)
 
 		# Proccess all recieved packets.
-		for sock in recieved_data:
+		for sock in rd_sock:
 			# Send data from client to relay target.
-			if sock is client_sock:
-				data = client_sock.recv(RECV_SIZE_UDP)
+			if sock is server_sock:
+				data = server_sock.recv(RECV_SIZE_UDP)
 
-				if data:
-					relay_sock.sendto(data, relay_address)
+				relay_sock.sendto(data, target_address)
 			# Send data from relay target to client.
 			elif sock is relay_sock:
 				data = relay_sock.recv(RECV_SIZE_UDP)
 
-				if data:
-					client_sock.sendto(data, client_address)
+				server_sock.sendto(data, client_address)
 
 # Entry point use gaurd.
 if __name__ == '__main__':
