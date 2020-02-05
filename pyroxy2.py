@@ -57,7 +57,13 @@ def main(protocol, src_addr, src_port, dest_addr, dest_port):
 	# Register SIGINT handler for clean exiting while in main loop.
 	signal.signal(signal.SIGINT, signal_handler)
 
-	print("\nPyroxy2")
+	print('''
+ ______   ______   _____  ____   __      ___|_
+|  _ \\ \\ / /  _ \\ / _ \\ \\/ /\\ \\ / /     /     \\
+| |_) \\ V /| |_) | | | \\  /  \\ V /    <[ x   x ]>
+|  __/ | | |  _ <| |_| /  \\   | |       \\  ^  /
+|_|    |_| |_| \\_\\\\___/_/\\_\\  |_|        ([=])
+		  ''')
 
 	target_address = (dest_addr, dest_port)
 
